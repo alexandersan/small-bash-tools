@@ -1,0 +1,79 @@
+#!/bin/bash
+
+f_help () {
+  [ $1 -eq 1 ] && echo "Error: bad command"
+  cat << eof
+Usage: ssh-vpn help|--help -- This message
+Usage: ssh-vpn start|--start -- Creates VPN tunnel over ssh (you must have root privileges on both machines)
+-h|--host     Remote host public IP. Default "128.199.133.88"
+-p|--port     Remote port. Default "22"
+-l|--left     Left IP for VPN channel. Default "10.100.0.200"
+-r|--right    Right IP for VPN channel. Default "10.100.0.100"
+-t|--tun      Tunnel interface number for BOTH sides. Default "0"
+-s|--sleep    Timeout before client side connection setup. Default 5
+-n|--net      Private subnet behind VPN gatevay. Default "192.168.2.0/24"
+-k|--key      Path and filename of private SSH key for 'root' user on remote server. Default use ssh-agent.
+Usage: ssh-vpn stop|--stop|status|--status -- Show PID or stop VPN tunnel
+-t|--tun      Tunnel interface number for BOTH sides. Default "0"
+eof
+  exit $1
+}
+
+[ ! -n $1 ] && f_help 1
+case $1 in
+  help|--help) f_help 0 ;;
+  start|stop|status|--start|--stop|--status) COMMAND=$1 ;;
+  *) f_help 1 ;;
+esac
+
+shift
+
+for i in $(seq 1 2 $#); do
+  key=${!i}
+  echo $key
+  j=$((i+1))
+  [ $# -ge $j ] && value=${!j} && echo $value
+  case $key in
+    -h|--host) HOST=$value ;;
+    -p|--port) PORT=$value ;;
+    -l|--left) L_IP=$value ;;
+    -r|--right) R_IP=$value ;;
+    -t|--tun) TUN=$value ;;
+    -s|--sleep) SLEEP=$value ;;
+    -n|--net) NET=$value ;;
+    -k|--key) SSH_KEY="-i $value" ;;
+  esac
+done
+
+case $COMMAND in
+  start|--start)
+    # By default start SSH VPN sesion on two machines with tun0 an simple routing
+    HOST=${HOST:-128.199.133.88} # $2
+    PORT=${PORT:-22}           # $3
+    L_IP=${L_IP:-10.100.0.200}   # $4
+    R_IP=${R_IP:-10.100.0.100}   # $5
+    TUN=${TUN:-0}               # $6
+    SLEEP=${SLEEP:-5}             # $7
+    NET=${NET:-192.168.2.0/24}  # $8
+    [ -z "$SSH_KEY" ] && SSH_KEY=""
+    sudo ssh -p $PORT $SSH_KEY -Cf -w $TUN:$TUN $HOST \
+       "sleep $SLEEP; ip link set tun$TUN up; ip addr add  $R_IP/32 peer $L_IP dev tun$TUN" && \
+       sudo bash -c "sleep $SLEEP; ip link set tun$TUN up; ip addr add $L_IP/32 peer $R_IP dev tun$TUN" && \
+       sudo echo "$(pgrep -u root -f 'ssh -p.* -Cf')" > ~/.ssh/vpn$TUN.pid
+    sudo ip r a $NET via $R_IP dev tun$TUN src $L_IP
+    set +x
+  ;;
+  stop|--stop)
+    TUN=${TUN:-0}
+    set -x
+    ps -fp $(cat ~/.ssh/vpn$TUN.pid) | grep 'ssh -p.* -Cf' > /dev/null && sudo kill -15 $(cat ~/.ssh/vpn$TUN.pid) || echo "ERROR: wrong PID"
+    rm -f ~/.ssh/vpn$TUN.pid
+    set +x
+  ;;
+  status|--status)
+    TUN=${TUN:-0}
+    set -x
+    ps -fp $(cat ~/.ssh/vpn$TUN.pid) | grep 'ssh -p.* -Cf' > /dev/null && echo "vpn$TUN.pid: $(cat ~/.ssh/vpn$TUN.pid)" || echo "ssh VPN is not running"
+    set +x
+  ;;
+esac
